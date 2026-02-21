@@ -2,7 +2,7 @@
   andika(message);
 }
 
-izina = 'Muraho from .ikw';
+izina = 'Jules package programming';
 subiramo(i, 1, 3) {
   vuga(izina);
   andika(i);

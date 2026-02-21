@@ -94,10 +94,6 @@ function parseBlock(lines, startIndex, stopAtClosingBrace) {
       throw new Error(`Unsupported block header: ${line}`);
     }
 
-    if (line.includes("{") || line.includes("}")) {
-      throw new Error(`Braces must be on their own block lines. Invalid line: ${line}`);
-    }
-
     statements.push({ type: "line", line });
     index += 1;
   }
