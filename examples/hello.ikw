@@ -1,9 +1,5 @@
-﻿umukoro vuga(message) {
-  andika(message);
+umukoro teranya(a, b) {
+  andika(a+b);
 }
 
-izina = 'Jules package programming';
-subiramo(i, 1, 3) {
-  vuga(izina);
-  andika(i);
-}
+teranya(5, 10);
