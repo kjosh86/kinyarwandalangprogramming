@@ -1,5 +1,1 @@
-umukoro teranya(a, b) {
-  andika(a+b);
-}
-
-teranya(5, 10);
+andika('fabrice nimbwa')

@@ -1,4 +1,4 @@
-﻿import { parseArgs, parseValue } from "./utils.js";
+import { parseArgs, parseValue } from "./utils.js";
 
 function ensureDocument() {
   if (typeof document === "undefined") {
@@ -28,6 +28,21 @@ export async function networkCommand(line, variables = {}) {
     return new FormData(form);
   }
 
+  if (line.startsWith("subiza_json")) {
+    const [urlRaw, payloadRaw] = parseArgs(line, "subiza_json");
+    const url = String(parseValue(urlRaw, variables));
+    const payload = parseValue(payloadRaw, variables);
+    ensureFetch();
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: payload instanceof FormData ? undefined : { "Content-Type": "application/json" },
+      body: payload instanceof FormData ? payload : JSON.stringify(payload)
+    });
+
+    return parseResponseBody(response);
+  }
+
   if (line.startsWith("subiza")) {
     const [urlRaw, payloadRaw] = parseArgs(line, "subiza");
     const url = String(parseValue(urlRaw, variables));
@@ -44,6 +59,15 @@ export async function networkCommand(line, variables = {}) {
     });
   }
 
+  if (line.startsWith("zana_json")) {
+    const [urlRaw] = parseArgs(line, "zana_json");
+    const url = String(parseValue(urlRaw, variables));
+    ensureFetch();
+
+    const response = await fetch(url, { method: "GET" });
+    return parseResponseBody(response);
+  }
+
   if (line.startsWith("zana")) {
     const [urlRaw] = parseArgs(line, "zana");
     const url = String(parseValue(urlRaw, variables));
@@ -53,4 +77,20 @@ export async function networkCommand(line, variables = {}) {
   }
 
   return null;
+}
+
+async function parseResponseBody(response) {
+  const contentType = response.headers.get("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+
+  const text = await response.text();
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }

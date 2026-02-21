@@ -1,5 +1,6 @@
-﻿const SINGLE_QUOTED = /^'([\s\S]*)'$/;
+const SINGLE_QUOTED = /^'([\s\S]*)'$/;
 const DOUBLE_QUOTED = /^"([\s\S]*)"$/;
+const NO_EXPRESSION_VALUE = Symbol("NO_EXPRESSION_VALUE");
 
 export function parseArgs(line, commandName) {
   const raw = extractArgString(line, commandName);
@@ -46,6 +47,9 @@ export function parseSingleQuoted(value) {
 
 export function parseValue(token, variables = {}) {
   const trimmed = token.trim();
+  if (trimmed === "") {
+    throw new Error("Cannot parse an empty value token.");
+  }
 
   if (SINGLE_QUOTED.test(trimmed)) {
     return parseSingleQuoted(trimmed);
@@ -56,7 +60,11 @@ export function parseValue(token, variables = {}) {
   }
 
   if (/^\{[\s\S]*\}$/.test(trimmed) || /^\[[\s\S]*\]$/.test(trimmed)) {
-    return JSON.parse(trimmed);
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Fall through and treat this as an expression when JSON parsing fails.
+    }
   }
 
   if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
@@ -83,8 +91,13 @@ export function parseValue(token, variables = {}) {
     return variables[trimmed];
   }
 
+  const pathResult = resolvePathValue(trimmed, variables);
+  if (pathResult.found) {
+    return pathResult.value;
+  }
+
   const expressionValue = tryEvaluateExpression(trimmed, variables);
-  if (expressionValue !== undefined) {
+  if (expressionValue !== NO_EXPRESSION_VALUE) {
     return expressionValue;
   }
 
@@ -181,53 +194,117 @@ function tryEvaluateExpression(expression, variables) {
     return parseValue(unwrapped, variables);
   }
 
-  const addSubOperator = findTopLevelOperator(expression, ["+", "-"]);
-  if (addSubOperator) {
-    const leftRaw = expression.slice(0, addSubOperator.index).trim();
-    const rightRaw = expression.slice(addSubOperator.index + 1).trim();
+  const operatorGroups = [
+    ["||"],
+    ["&&"],
+    ["==", "!="],
+    [">=", "<=", ">", "<"],
+    ["+", "-"],
+    ["*", "/", "%"]
+  ];
+
+  for (const operators of operatorGroups) {
+    const match = findTopLevelBinaryOperator(expression, operators);
+    if (!match) {
+      continue;
+    }
+
+    const leftRaw = expression.slice(0, match.index).trim();
+    const rightRaw = expression.slice(match.index + match.operator.length).trim();
     const left = parseValue(leftRaw, variables);
     const right = parseValue(rightRaw, variables);
 
-    if (addSubOperator.operator === "+") {
-      if (typeof left === "string" || typeof right === "string") {
-        return `${left}${right}`;
-      }
+    return applyBinaryOperator(match.operator, left, right, leftRaw, rightRaw);
+  }
 
-      return toNumber(left, leftRaw) + toNumber(right, rightRaw);
+  if (expression.startsWith("!")) {
+    const value = parseValue(expression.slice(1), variables);
+    return !Boolean(value);
+  }
+
+  if (expression.startsWith("-") && isUnaryOperator(expression, 0)) {
+    const value = parseValue(expression.slice(1), variables);
+    return -toNumber(value, expression.slice(1));
+  }
+
+  if (expression.startsWith("+") && isUnaryOperator(expression, 0)) {
+    const value = parseValue(expression.slice(1), variables);
+    return toNumber(value, expression.slice(1));
+  }
+
+  return NO_EXPRESSION_VALUE;
+}
+
+function applyBinaryOperator(operator, left, right, leftRaw, rightRaw) {
+  if (operator === "||") {
+    return Boolean(left) || Boolean(right);
+  }
+
+  if (operator === "&&") {
+    return Boolean(left) && Boolean(right);
+  }
+
+  if (operator === "==") {
+    return left === right;
+  }
+
+  if (operator === "!=") {
+    return left !== right;
+  }
+
+  if (operator === ">") {
+    return toComparable(left, leftRaw) > toComparable(right, rightRaw);
+  }
+
+  if (operator === "<") {
+    return toComparable(left, leftRaw) < toComparable(right, rightRaw);
+  }
+
+  if (operator === ">=") {
+    return toComparable(left, leftRaw) >= toComparable(right, rightRaw);
+  }
+
+  if (operator === "<=") {
+    return toComparable(left, leftRaw) <= toComparable(right, rightRaw);
+  }
+
+  if (operator === "+") {
+    if (typeof left === "string" || typeof right === "string") {
+      return `${left}${right}`;
     }
 
+    return toNumber(left, leftRaw) + toNumber(right, rightRaw);
+  }
+
+  if (operator === "-") {
     return toNumber(left, leftRaw) - toNumber(right, rightRaw);
   }
 
-  const mulDivOperator = findTopLevelOperator(expression, ["*", "/", "%"]);
-  if (mulDivOperator) {
-    const leftRaw = expression.slice(0, mulDivOperator.index).trim();
-    const rightRaw = expression.slice(mulDivOperator.index + 1).trim();
-    const left = toNumber(parseValue(leftRaw, variables), leftRaw);
-    const right = toNumber(parseValue(rightRaw, variables), rightRaw);
-
-    if (mulDivOperator.operator === "*") {
-      return left * right;
-    }
-
-    if (mulDivOperator.operator === "/") {
-      return left / right;
-    }
-
-    return left % right;
+  if (operator === "*") {
+    return toNumber(left, leftRaw) * toNumber(right, rightRaw);
   }
 
-  return undefined;
+  if (operator === "/") {
+    return toNumber(left, leftRaw) / toNumber(right, rightRaw);
+  }
+
+  if (operator === "%") {
+    return toNumber(left, leftRaw) % toNumber(right, rightRaw);
+  }
+
+  throw new Error(`Unsupported operator: ${operator}`);
 }
 
-function findTopLevelOperator(expression, operators) {
+function findTopLevelBinaryOperator(expression, operators) {
+  const sortedOperators = [...operators].sort((left, right) => right.length - left.length);
+  let inSingleQuotes = false;
+  let inDoubleQuotes = false;
   let parenDepth = 0;
   let bracketDepth = 0;
   let braceDepth = 0;
-  let inSingleQuotes = false;
-  let inDoubleQuotes = false;
+  let lastMatch = null;
 
-  for (let index = expression.length - 1; index >= 0; index -= 1) {
+  for (let index = 0; index < expression.length; index += 1) {
     const char = expression[index];
     const previous = expression[index - 1];
 
@@ -236,7 +313,7 @@ function findTopLevelOperator(expression, operators) {
       continue;
     }
 
-    if (!inSingleQuotes && char === "\"" && previous !== "\\") {
+    if (!inSingleQuotes && char === '"' && previous !== "\\") {
       inDoubleQuotes = !inDoubleQuotes;
       continue;
     }
@@ -245,29 +322,56 @@ function findTopLevelOperator(expression, operators) {
       continue;
     }
 
-    if (char === ")") parenDepth += 1;
-    if (char === "(") parenDepth -= 1;
-    if (char === "]") bracketDepth += 1;
-    if (char === "[") bracketDepth -= 1;
-    if (char === "}") braceDepth += 1;
-    if (char === "{") braceDepth -= 1;
+    if (char === "(") {
+      parenDepth += 1;
+      continue;
+    }
+
+    if (char === ")") {
+      parenDepth -= 1;
+      continue;
+    }
+
+    if (char === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+
+    if (char === "]") {
+      bracketDepth -= 1;
+      continue;
+    }
+
+    if (char === "{") {
+      braceDepth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      braceDepth -= 1;
+      continue;
+    }
 
     if (parenDepth !== 0 || bracketDepth !== 0 || braceDepth !== 0) {
       continue;
     }
 
-    if (!operators.includes(char)) {
-      continue;
-    }
+    for (const operator of sortedOperators) {
+      if (!expression.startsWith(operator, index)) {
+        continue;
+      }
 
-    if ((char === "-" || char === "+") && isUnaryOperator(expression, index)) {
-      continue;
-    }
+      if ((operator === "+" || operator === "-") && isUnaryOperator(expression, index)) {
+        continue;
+      }
 
-    return { index, operator: char };
+      lastMatch = { index, operator };
+      index += operator.length - 1;
+      break;
+    }
   }
 
-  return null;
+  return lastMatch;
 }
 
 function stripEnclosingParentheses(value) {
@@ -289,7 +393,7 @@ function stripEnclosingParentheses(value) {
       continue;
     }
 
-    if (!inSingleQuotes && char === "\"" && previous !== "\\") {
+    if (!inSingleQuotes && char === '"' && previous !== "\\") {
       inDoubleQuotes = !inDoubleQuotes;
       continue;
     }
@@ -298,8 +402,13 @@ function stripEnclosingParentheses(value) {
       continue;
     }
 
-    if (char === "(") depth += 1;
-    if (char === ")") depth -= 1;
+    if (char === "(") {
+      depth += 1;
+    }
+
+    if (char === ")") {
+      depth -= 1;
+    }
 
     if (depth === 0 && index < trimmed.length - 1) {
       return trimmed;
@@ -310,13 +419,21 @@ function stripEnclosingParentheses(value) {
 }
 
 function isUnaryOperator(expression, index) {
-  const prefix = expression.slice(0, index).trim();
+  const prefix = expression.slice(0, index).trimEnd();
   if (prefix === "") {
     return true;
   }
 
   const previousChar = prefix[prefix.length - 1];
-  return ["+", "-", "*", "/", "%", "(", ","].includes(previousChar);
+  return ["+", "-", "*", "/", "%", "<", ">", "=", "!", "&", "|", "(", ","].includes(previousChar);
+}
+
+function toComparable(value, token) {
+  if (typeof value === "number" || typeof value === "string") {
+    return value;
+  }
+
+  throw new Error(`Expected comparable value for token: ${token}`);
 }
 
 function toNumber(value, token) {
@@ -329,4 +446,85 @@ function toNumber(value, token) {
   }
 
   throw new Error(`Expected numeric value for expression token: ${token}`);
+}
+
+function resolvePathValue(token, variables) {
+  const tokens = parsePathTokens(token);
+  if (!tokens) {
+    return { found: false, value: undefined };
+  }
+
+  const [rootName, ...path] = tokens;
+  if (!hasVariable(variables, rootName)) {
+    return { found: false, value: undefined };
+  }
+
+  let current = variables[rootName];
+  for (const part of path) {
+    if (current === null || current === undefined) {
+      return { found: false, value: undefined };
+    }
+
+    if (typeof part === "number") {
+      if (!Array.isArray(current) || part < 0 || part >= current.length) {
+        return { found: false, value: undefined };
+      }
+      current = current[part];
+      continue;
+    }
+
+    if (!(part in current)) {
+      return { found: false, value: undefined };
+    }
+
+    current = current[part];
+  }
+
+  return { found: true, value: current };
+}
+
+function parsePathTokens(token) {
+  let index = 0;
+  const tokens = [];
+
+  const rootMatch = token.slice(index).match(/^[a-zA-Z_][a-zA-Z0-9_]*/);
+  if (!rootMatch) {
+    return null;
+  }
+
+  tokens.push(rootMatch[0]);
+  index += rootMatch[0].length;
+
+  while (index < token.length) {
+    if (token[index] === ".") {
+      const propertyMatch = token.slice(index + 1).match(/^[a-zA-Z_][a-zA-Z0-9_]*/);
+      if (!propertyMatch) {
+        return null;
+      }
+
+      tokens.push(propertyMatch[0]);
+      index += propertyMatch[0].length + 1;
+      continue;
+    }
+
+    if (token[index] === "[") {
+      const close = token.indexOf("]", index + 1);
+      if (close === -1) {
+        return null;
+      }
+
+      const value = token.slice(index + 1, close).trim();
+      if (!/^\d+$/.test(value)) {
+        return null;
+      }
+
+      tokens.push(Number(value));
+      index = close + 1;
+      continue;
+    }
+
+    return null;
+  }
+
+  return tokens;
 }
