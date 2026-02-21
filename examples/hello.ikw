@@ -1,0 +1,9 @@
+﻿umukoro vuga(message) {
+  andika(message);
+}
+
+izina = 'Muraho from .ikw';
+subiramo(i, 1, 3) {
+  vuga(izina);
+  andika(i);
+}
